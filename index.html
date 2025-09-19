@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Upload/Download lên GitHub Repo</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;max-width:900px;margin:24px auto;padding:0 16px}
+    header{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+    input,button,select{padding:8px;border-radius:6px;border:1px solid #ddd}
+    .file-list{margin-top:16px}
+    .row{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+    pre{background:#f7f7f7;padding:12px;border-radius:6px;overflow:auto}
+    .note{color:#444;font-size:0.95rem}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>GitHub File Uploader (Demo)</h1>
+  </header>
+
+  <section>
+    <div class="row">
+      <label>Owner: <input id="owner" placeholder="your-username-or-org"/></label>
+      <label>Repo: <input id="repo" placeholder="your-repo-name"/></label>
+      <label>Branch: <input id="branch" value="main" style="width:100px"/></label>
+    </div>
+    <div class="row">
+      <label>Path trong repo: <input id="path" placeholder="(ví dụ: uploads)" /></label>
+      <label>Token (PAT): <input id="token" placeholder="ghp_xxx..." style="width:320px" /></label>
+    </div>
+
+    <div class="row">
+      <input type="file" id="fileinput"/>
+      <button id="btnUpload">Upload lên repo</button>
+      <button id="btnList">Liệt kê file</button>
+    </div>
+
+    <div class="file-list" id="fileList"></div>
+
+    <h3>Log</h3>
+    <pre id="log"></pre>
+
+    <p class="note">
+      Ghi chú: Token dùng để đọc/ghi/xóa trong repo. Đừng commit token. File lớn (>100MB) không phù hợp.
+    </p>
+  </section>
+
+<script>
+const $ = id => document.getElementById(id);
+const log = txt => { const p = $('log'); p.textContent = txt + "\n" + p.textContent; }
+
+// Build API base
+function apiBase(owner, repo) {
+  return `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents`;
+}
+
+// get headers (with optional token)
+function headers(token){
+  const h = { "Accept": "application/vnd.github+json" };
+  if(token) h["Authorization"] = `token ${token}`;
+  return h;
+}
+
+// list files at path
+async function listFiles(){
+  const owner = $('owner').value.trim();
+  const repo = $('repo').value.trim();
+  const branch = $('branch').value.trim() || 'main';
+  const path = $('path').value.trim() || '';
+  const token = $('token').value.trim();
+
+  if(!owner||!repo){ alert('Nhập owner và repo'); return; }
+  const url = `${apiBase(owner,repo)}/${encodeURIComponent(path)}`;
+  try{
+    const r = await fetch(url + `?ref=${encodeURIComponent(branch)}`, { headers: headers(token) });
+    if(r.status === 404){
+      $('fileList').innerHTML = '<em>Không tìm thấy path hoặc rỗng.</em>';
+      log(`list: 404`);
+      return;
+    }
+    const data = await r.json();
+    if(!Array.isArray(data)){
+      // nếu là 1 file, chuyển thành mảng
+      if(data && data.type === 'file'){
+        renderList([data]);
+      } else {
+        $('fileList').innerHTML = '<em>Không có file.</em>';
+      }
+    } else {
+      renderList(data);
+    }
+    log(`Liệt kê thành công (${data.length||1} mục)`);
+  }catch(e){
+    console.error(e); log('Lỗi list: '+e);
+  }
+}
+
+function renderList(items){
+  const container = $('fileList');
+  container.innerHTML = '';
+  if(!items || items.length===0){ container.innerHTML = '<em>Không có file</em>'; return; }
+  items.sort((a,b)=> (a.name||'').localeCompare(b.name||''));
+  items.forEach(it=>{
+    const div = document.createElement('div');
+    div.className = 'row';
+    const name = document.createElement('span');
+    name.textContent = it.name;
+    const size = document.createElement('small');
+    size.textContent = ` (${it.size} bytes) `;
+    const dl = document.createElement('button');
+    dl.textContent = 'Tải';
+    dl.onclick = () => downloadFileByUrl(it);
+    const raw = document.createElement('button');
+    raw.textContent = 'Xem nội dung';
+    raw.onclick = () => previewFile(it);
+    const del = document.createElement('button');
+    del.textContent = 'Xóa';
+    del.onclick = () => deleteFile(it);
+    div.appendChild(name);
+    div.appendChild(size);
+    div.appendChild(dl);
+    div.appendChild(raw);
+    div.appendChild(del);
+    container.appendChild(div);
+  })
+}
+
+// upload selected file
+async function uploadSelected(){
+  const f = $('fileinput').files[0];
+  if(!f){ alert('Chọn file để upload'); return; }
+  const owner = $('owner').value.trim();
+  const repo = $('repo').value.trim();
+  const branch = $('branch').value.trim() || 'main';
+  const path = $('path').value.trim() || '';
+  const token = $('token').value.trim();
+  if(!owner||!repo||!token){ alert('Nhập owner, repo và token'); return; }
+
+  // path trong repo: path/filename
+  const remotePath = (path? path.replace(/\/+$/,'') + '/' : '') + f.name;
+
+  // read file as base64
+  const contentBase64 = await new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => {
+      // r.result is data:...;base64,strip prefix
+      const raw = r.result;
+      const base64 = raw.split(',')[1];
+      res(base64);
+    };
+    r.onerror = e => rej(e);
+    r.readAsDataURL(f);
+  });
+
+  // Need to check if file exists to get sha for update
+  const url = `${apiBase(owner,repo)}/${encodeURIComponent(remotePath)}`;
+  let sha = null;
+  try {
+    const check = await fetch(url + `?ref=${encodeURIComponent(branch)}`, { headers: headers(token) });
+    if(check.ok){
+      const j = await check.json();
+      sha = j.sha;
+      log('File tồn tại trên repo, sẽ ghi đè (sha: ' + sha + ')');
+    } else {
+      log('File chưa tồn tại, sẽ tạo mới');
+    }
+  } catch(e){ log('Kiểm tra tồn tại lỗi: '+e) }
+
+  const body = {
+    message: `Upload via web: ${f.name}`,
+    content: contentBase64,
+    branch: branch
+  };
+  if(sha) body.sha = sha;
+
+  try{
+    const put = await fetch(url, {
+      method: 'PUT',
+      headers: Object.assign({ "Content-Type": "application/json" }, headers(token)),
+      body: JSON.stringify(body)
+    });
+    const resp = await put.json();
+    if(put.status === 201 || put.status === 200){
+      log('Upload thành công: ' + resp.content.path);
+      listFiles();
+    } else {
+      log('Upload thất bại: ' + JSON.stringify(resp));
+    }
+  }catch(e){
+    console.error(e); log('Lỗi upload: '+e);
+  }
+}
+
+// download using download_url or content
+async function downloadFileByUrl(item){
+  // item may include download_url
+  if(item.download_url){
+    // open in new tab so browser downloads
+    window.open(item.download_url, '_blank');
+    log('Mở download_url: ' + item.download_url);
+    return;
+  }
+  // fallback: fetch contents API and create blob
+  try{
+    const owner = $('owner').value.trim(), repo = $('repo').value.trim(), branch = $('branch').value.trim()||'main', token = $('token').value.trim();
+    const url = `${apiBase(owner,repo)}/${encodeURIComponent(item.path)}?ref=${encodeURIComponent(branch)}`;
+    const r = await fetch(url, { headers: headers(token) });
+    const j = await r.json();
+    if(j.content){
+      const b64 = j.content.replace(/\n/g,'');
+      const bytes = atob(b64);
+      const arr = new Uint8Array(bytes.length);
+      for(let i=0;i<bytes.length;i++) arr[i]=bytes.charCodeAt(i);
+      const blob = new Blob([arr]);
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = item.name;
+      link.click();
+      URL.revokeObjectURL(link.href);
+      log('Tải xuống: ' + item.name);
+    } else {
+      log('Không có nội dung để tải');
+    }
+  }catch(e){ console.error(e); log('Lỗi download: '+e); }
+}
+
+// preview small text files inline
+async function previewFile(item){
+  try{
+    const owner = $('owner').value.trim(), repo = $('repo').value.trim(), branch = $('branch').value.trim()||'main', token = $('token').value.trim();
+    const url = `${apiBase(owner,repo)}/${encodeURIComponent(item.path)}?ref=${encodeURIComponent(branch)}`;
+    const r = await fetch(url, { headers: headers(token) });
+    const j = await r.json();
+    if(j.content){
+      const b64 = j.content.replace(/\n/g,'');
+      const txt = atob(b64);
+      alert('Nội dung (preview):\n\n' + txt.slice(0, 10000));
+    } else {
+      alert('Không thể lấy nội dung để preview');
+    }
+  }catch(e){ console.error(e); log('Lỗi preview: '+e); }
+}
+
+// delete file (need sha)
+async function deleteFile(item){
+  if(!confirm('Bạn có chắn chắn muốn xóa: ' + item.path + ' ?')) return;
+  const owner = $('owner').value.trim(), repo = $('repo').value.trim(), branch = $('branch').value.trim()||'main', token = $('token').value.trim();
+  const url = `${apiBase(owner,repo)}/${encodeURIComponent(item.path)}`;
+  try{
+    // get latest sha
+    const check = await fetch(url + `?ref=${encodeURIComponent(branch)}`, { headers: headers(token) });
+    const j = await check.json();
+    if(!j.sha){ log('Không lấy được sha'); return; }
+    const body = {
+      message: `Delete via web: ${item.path}`,
+      sha: j.sha,
+      branch: branch
+    };
+    const del = await fetch(url, {
+      method: 'DELETE',
+      headers: Object.assign({ "Content-Type": "application/json" }, headers(token)),
+      body: JSON.stringify(body)
+    });
+    const resp = await del.json();
+    if(del.ok){ log('Xóa thành công: ' + item.path); listFiles(); }
+    else { log('Xóa thất bại: ' + JSON.stringify(resp)); }
+  }catch(e){ console.error(e); log('Lỗi delete: '+e); }
+}
+
+// hook buttons
+$('btnUpload').addEventListener('click', uploadSelected);
+$('btnList').addEventListener('click', listFiles);
+
+// auto-list on load if fields set
+window.addEventListener('load', ()=>{ /* nothing by default */ });
+</script>
+</body>
+</html>
